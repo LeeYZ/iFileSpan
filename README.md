@@ -39,7 +39,7 @@ iFileSpan 是一款原生 macOS 文件管理工具，通过 USB 浏览设备允�
 
 ## 安装
 
-1. 从仓库的 **Releases** 页面下载 `iFileSpan-v0.8.5-macOS-arm64.zip`（发布后可用）。
+1. 从 [Releases](https://github.com/LeeYZ/iFileSpan/releases/latest) 下载 [iFileSpan-v0.8.5-macOS-arm64.zip](https://github.com/LeeYZ/iFileSpan/releases/download/v0.8.5/iFileSpan-v0.8.5-macOS-arm64.zip)。
 2. 解压，将 `iFileSpan.app` 拖到“应用程序”。
 3. 打开 iFileSpan，用 USB 连接并解锁设备，按提示完成信任。
 4. 如果正在使用旧版，请先完全退出旧版，再替换并打开新版。
