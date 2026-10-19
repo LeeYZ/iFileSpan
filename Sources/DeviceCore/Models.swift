@@ -113,11 +113,16 @@ public final class TransferCancellation: @unchecked Sendable {
 }
 
 public struct TransferProgress: Sendable {
+    public enum Unit: Sendable, Equatable { case bytes, percent }
     public let message: String
     public let completed: UInt64
     public let total: UInt64
-    public init(_ message: String, completed: UInt64 = 0, total: UInt64 = 0) {
+    public let unit: Unit
+    public let cancellable: Bool
+    public init(_ message: String, completed: UInt64 = 0, total: UInt64 = 0,
+                unit: Unit = .bytes, cancellable: Bool = true) {
         self.message = message; self.completed = completed; self.total = total
+        self.unit = unit; self.cancellable = cancellable
     }
 }
 

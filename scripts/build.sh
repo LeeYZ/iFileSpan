@@ -34,6 +34,9 @@ if [ -d "$PROJECT_DIR/Vendor/Frameworks" ]; then
     "$CLANG" "$PROJECT_DIR/scripts/library-check.c" "$BUILD_DIR/DeviceBridge.o" \
         -arch "$ARCH" -mmacosx-version-min=14.0 -isysroot "$SDK" -I "$BUILD_DIR/DeviceBridge" -o "$BUILD_DIR/library-check"
     "$BUILD_DIR/library-check" "$APP_DIR/Contents/Frameworks"
+    "$CLANG" "$PROJECT_DIR/scripts/installation-bridge-test.c" \
+        -arch "$ARCH" -mmacosx-version-min=14.0 -isysroot "$SDK" -I "$BUILD_DIR/DeviceBridge" -o "$BUILD_DIR/installation-bridge-test"
+    "$BUILD_DIR/installation-bridge-test" "$APP_DIR/Contents/Frameworks"
 fi
 SIGNATURE_VERIFIED=0
 for ATTEMPT in 1 2 3; do

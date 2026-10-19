@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 // Stable public C ABI; the upstream library remains an external dependency.
 static void *library;
@@ -22,6 +25,10 @@ FN(int, lockdownd_get_value, (void *, const char *, const char *, void **));
 FN(int, instproxy_client_start_service, (void *, void **, const char *));
 FN(int, instproxy_client_free, (void *));
 FN(int, instproxy_browse, (void *, void *, void **));
+FN(int, property_list_service_client_new, (void *, void *, void **));
+FN(int, property_list_service_client_free, (void *));
+FN(int, property_list_service_send_xml_plist, (void *, void *));
+FN(int, property_list_service_receive_plist_with_timeout, (void *, void **, unsigned int));
 FN(int, sbservices_client_start_service, (void *, void **, const char *));
 FN(int, sbservices_client_free, (void *));
 FN(int, sbservices_get_icon_pngdata, (void *, const char *, char **, uint64_t *));
@@ -84,6 +91,8 @@ int df_load(const char *framework_directory) {
     LOAD(lockdownd_client_new_with_handshake); LOAD(lockdownd_client_free); LOAD(lockdownd_get_value);
     LOAD(lockdownd_start_service); LOAD(lockdownd_service_descriptor_free); LOAD(house_arrest_client_new);
     LOAD(instproxy_client_start_service); LOAD(instproxy_client_free); LOAD(instproxy_browse);
+    LOAD(property_list_service_client_new); LOAD(property_list_service_client_free);
+    LOAD(property_list_service_send_xml_plist); LOAD(property_list_service_receive_plist_with_timeout);
     LOAD(sbservices_client_start_service); LOAD(sbservices_client_free); LOAD(sbservices_get_icon_pngdata);
     LOAD(house_arrest_client_start_service); LOAD(house_arrest_client_free);
     LOAD(house_arrest_send_command); LOAD(house_arrest_get_result);
@@ -236,6 +245,132 @@ int df_write(DFSession *s,uint64_t h,const char *b,uint32_t l,uint32_t *n) { AFC
 int df_move(DFSession *s,const char *f,const char *t) { AFC_RESULT(p_afc_rename_path(s->afc,f,t), "提交文件失败"); }
 int df_remove(DFSession *s,const char *p) { AFC_RESULT(p_afc_remove_path(s->afc,p), "移除设备文件失败"); }
 int df_mkdir(DFSession *s,const char *p) { AFC_RESULT(p_afc_make_directory(s->afc,p), "新建文件夹失败"); }
+
+struct DFInstaller { void *device; void *service; };
+void df_installer_free(DFInstaller *i) {
+    if (!i) return;
+    if (i->service) p_property_list_service_client_free(i->service);
+    if (i->device) p_idevice_free(i->device);
+    free(i);
+}
+DFInstaller *df_installer_new(const char *udid) {
+    if (!library || !udid || !*udid) { fail("请先连接设备", -1); return NULL; }
+    DFInstaller *i = calloc(1, sizeof(*i));
+    if (!i) { fail("内存不足", -1); return NULL; }
+    void *lockdown = NULL, *descriptor = NULL;
+    i->device = new_device(udid);
+    if (!i->device || handshake(i->device, &lockdown)) goto bad;
+    int r = p_lockdownd_start_service(lockdown, "com.apple.mobile.installation_proxy", &descriptor);
+    if (!r) r = p_property_list_service_client_new(i->device, descriptor, &i->service);
+    if (descriptor) p_lockdownd_service_descriptor_free(descriptor);
+    p_lockdownd_client_free(lockdown);
+    if (r) { fail("无法连接设备的 App 安装服务，请解锁设备并确认信任", r); df_installer_free(i); return NULL; }
+    return i;
+bad:
+    if (lockdown) p_lockdownd_client_free(lockdown);
+    df_installer_free(i); return NULL;
+}
+int df_installer_start(DFInstaller *i, const char *path, const char *bundle_id) {
+    // Keep commands inside our own staging area, never install a user-selected device path.
+    if (!i || !path || !bundle_id || !*bundle_id || strncmp(path, "PublicStaging/iFileSpan-", 24) || strstr(path, ".."))
+        return fail("无效的安装请求", -1);
+    void *command = p_plist_new_dict();
+    p_plist_dict_set_item(command, "Command", p_plist_new_string("Install"));
+    p_plist_dict_set_item(command, "PackagePath", p_plist_new_string(path));
+    void *options = p_plist_new_dict();
+    p_plist_dict_set_item(options, "CFBundleIdentifier", p_plist_new_string(bundle_id));
+    p_plist_dict_set_item(command, "ClientOptions", options);
+    int r = p_property_list_service_send_xml_plist(i->service, command);
+    p_plist_free(command);
+    return r ? fail("安装请求发送失败，结果尚未确认，请在设备上检查后重试", r) : 0;
+}
+int df_installer_receive(DFInstaller *i, char **status) {
+    if (!i || !status) return fail("无效的安装状态请求", -1);
+    *status = NULL;
+    void *node = NULL;
+    int r = p_property_list_service_receive_plist_with_timeout(i->service, &node, 1000);
+    if (r) {
+        if (node) p_plist_free(node);
+        if (r == -5) return 1; // PROPERTY_LIST_SERVICE_E_RECEIVE_TIMEOUT
+        return fail("与设备安装服务的连接中断，安装结果尚未确认，请在设备上检查", r);
+    }
+    *status = xml_copy(node);
+    if (node) p_plist_free(node);
+    return *status ? 0 : -1;
+}
+
+// Use macOS's system libarchive through its stable public C ABI. Nothing is extracted.
+int df_ipa_info(const char *path, char **info, uint64_t *size) {
+    if (!path || !info || !size) return fail("无效的 IPA 请求", -1);
+    *info = NULL; *size = 0;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    struct stat attributes;
+    if (fd < 0) return fail("无法读取 IPA 文件", -1);
+    if (fstat(fd, &attributes) || !S_ISREG(attributes.st_mode)) {
+        close(fd); return fail("IPA 必须是普通文件", -1);
+    }
+    void *lib = dlopen("/usr/lib/libarchive.2.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) { close(fd); return fail("系统压缩包读取组件不可用", -1); }
+    void *(*read_new)(void) = dlsym(lib, "archive_read_new");
+    int (*support_zip)(void *) = dlsym(lib, "archive_read_support_format_zip");
+    int (*open_fd)(void *, int, size_t) = dlsym(lib, "archive_read_open_fd");
+    int (*next)(void *, void **) = dlsym(lib, "archive_read_next_header");
+    const char *(*pathname)(void *) = dlsym(lib, "archive_entry_pathname");
+    unsigned int (*filetype)(void *) = dlsym(lib, "archive_entry_filetype");
+    int64_t (*entry_size)(void *) = dlsym(lib, "archive_entry_size");
+    ssize_t (*read_data)(void *, void *, size_t) = dlsym(lib, "archive_read_data");
+    int (*read_free)(void *) = dlsym(lib, "archive_read_free");
+    int result = -1, matches = 0, entries = 0;
+    void *archive = NULL, *entry = NULL;
+    const char *message = "IPA 损坏或不是有效的 ZIP 安装包";
+    if (!read_new || !support_zip || !open_fd || !next || !pathname || !filetype || !entry_size || !read_data || !read_free) {
+        message = "系统压缩包读取组件缺少接口"; goto done;
+    }
+    archive = read_new();
+    if (!archive || support_zip(archive) || open_fd(archive, fd, 65536)) goto done;
+    int r;
+    while ((r = next(archive, &entry)) == 0) {
+        if (++entries > 250000) { message = "IPA 包含过多项目"; goto done; }
+        const char *name = pathname(entry);
+        if (!name || !*name || *name == '/' || strchr(name, '\\')) { message = "IPA 包含无效路径"; goto done; }
+        for (const char *segment = name; *segment;) {
+            const char *end = strchr(segment, '/');
+            size_t length = end ? (size_t)(end - segment) : strlen(segment);
+            if (!length || (length == 1 && segment[0] == '.') || (length == 2 && !memcmp(segment, "..", 2))) {
+                message = "IPA 包含无效路径"; goto done;
+            }
+            if (!end) break;
+            segment = end + 1;
+        }
+        if (strncmp(name, "Payload/", 8)) continue;
+        const char *slash = strchr(name + 8, '/');
+        if (!slash || slash - (name + 8) <= 4 || memcmp(slash - 4, ".app", 4) || strcmp(slash + 1, "Info.plist")) continue;
+        if (++matches != 1) { message = "IPA 中有多个主应用，无法确定安装目标"; goto done; }
+        int64_t length = entry_size(entry);
+        if (filetype(entry) != S_IFREG || length <= 0 || length > 4 * 1024 * 1024) {
+            message = "IPA 的主应用 Info.plist 无效或过大"; goto done;
+        }
+        *info = malloc((size_t)length);
+        if (!*info) { message = "内存不足"; goto done; }
+        size_t offset = 0;
+        while (offset < (size_t)length) {
+            ssize_t count = read_data(archive, *info + offset, (size_t)length - offset);
+            if (count <= 0) goto done;
+            offset += (size_t)count;
+        }
+        char extra;
+        if (read_data(archive, &extra, 1) != 0) goto done;
+        *size = (uint64_t)length;
+    }
+    if (r != 1) goto done; // ARCHIVE_EOF
+    if (matches != 1) { message = "IPA 缺少 Payload/*.app/Info.plist"; goto done; }
+    result = 0;
+done:
+    if (archive) read_free(archive);
+    dlclose(lib); close(fd);
+    if (result) { free(*info); *info = NULL; *size = 0; return fail(message, -1); }
+    return 0;
+}
 
 // Reuse only the lockdown trust session. Devices may close House Arrest after ANY command.
 // A successful command switches to AFC; transfer that client to an independently owned session.

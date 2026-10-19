@@ -1,6 +1,7 @@
 import SwiftUI
 import Observation
 import DeviceCore
+import UniformTypeIdentifiers
 
 @MainActor @Observable
 final class AppModel {
@@ -50,6 +51,7 @@ final class AppModel {
     var transferableSelection: [RemoteEntry] { selectedEntries.filter { $0.kind == .file || $0.kind == .directory } }
     var canCopy: Bool { !busy && !transferableSelection.isEmpty }
     var canDelete: Bool { !busy && !selectedEntries.isEmpty && selectedEntries.allSatisfy { $0.kind == .file } }
+    var canInstallIPA: Bool { !busy && currentDevice != nil && currentDevice?.connectionError == nil }
     var visibleApps: [DeviceApp] {
         apps.filter { AppListFilter.includes($0, availability: appAvailability[$0.id],
             hideRestrictedApps: hideRestrictedApps, sharingOnly: sharingOnly, search: search) }
@@ -145,6 +147,10 @@ final class AppModel {
             defer { busy = false; progress = nil }
             do { try await operation() }
             catch is CancellationError { status = "操作已取消；尚未提交的设备修改未执行。" }
+            catch let error as IPAInstallationError where error.outcomeUnknown {
+                errorMessage = error.localizedDescription
+                status = "安装结果尚未确认，请先在设备上检查该 App。"
+            }
             catch { errorMessage = error.localizedDescription; status = "操作失败，可查看错误详情。" }
         }
     }
@@ -274,6 +280,44 @@ final class AppModel {
             do { entries = try await service.list(directory) }
             catch { status += " 列表刷新失败，请重新连接设备。" }
             selectedPath = target
+        }
+    }
+    func installIPA() {
+        guard canInstallIPA, let device = currentDevice else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择要安装的 IPA"
+        panel.prompt = "检查安装包"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "ipa") ?? .data]
+        guard panel.runModal() == .OK, let source = panel.url else { return }
+        perform("正在检查 IPA…") { [self] in
+            let package = try await service.prepareIPA(source, cancellation: cancellation, progress: progressHandler())
+            defer { package.discard() }
+            try cancellation.check()
+            progress = nil
+            let alert = NSAlert()
+            alert.messageText = "将“\(package.name)”安装到“\(device.name)”？"
+            alert.informativeText = "版本：\(package.version)\n标识符：\(package.bundleID)\n大小：\(ByteCountFormatter.string(fromByteCount: Int64(clamping: package.size), countStyle: .file))\n\n同标识符的已有 App 可能被更新。安装需要有效签名和设备授权，本程序不会重签名。上传阶段可以取消；提交安装后无法撤回，请保持设备连接。"
+            alert.addButton(withTitle: "取消")
+            alert.addButton(withTitle: "安装")
+            guard alert.runModal() == .alertSecondButtonReturn else { status = "已取消安装，未向设备提交安装包。"; return }
+            try cancellation.check()
+            resetFiles()
+            await service.disconnect()
+            let warning = try await service.installIPA(package, udid: device.id, cancellation: cancellation, progress: progressHandler())
+            cancellation = TransferCancellation() // Discard queued progress from the completed installation.
+            progress = TransferProgress("安装已完成，正在刷新应用列表…", cancellable: false)
+            resetSidebar()
+            do {
+                try await loadApps(refreshPermissions: true)
+                status = "“\(package.name)”安装完成。" + (warning ?? "")
+            } catch {
+                status = "设备已确认“\(package.name)”安装完成；App 列表刷新失败，请重新检测。"
+                errorMessage = status + "\n" + error.localizedDescription + (warning.map { "\n" + $0 } ?? "")
+                return
+            }
+            if let warning { errorMessage = warning }
         }
     }
     func createFolder() {

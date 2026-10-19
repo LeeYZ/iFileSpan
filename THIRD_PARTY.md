@@ -15,3 +15,5 @@
 允许依照相应 LGPL 条款为个人使用修改、调试和替换这些动态库，并为调试对库的修改而进行所需的逆向工程。应用通过公共 C 接口动态加载这些库，未启用阻止用户替换库的强化运行时库验证。替换后请重新签名修改的库和 App；操作方法见项目 README。
 
 本项目不隶属于 Apple、Homebrew 或 libimobiledevice 项目。SwiftUI、Foundation、Observation、CryptoKit 和 AppKit 由 Apple macOS SDK 提供。所有组件均按各自许可证提供，不附加对第三方组件许可权利的限制。
+
+IPA 的 ZIP 元数据读取使用 macOS 系统提供的 libarchive，不在安装包中附带该系统库的副本。

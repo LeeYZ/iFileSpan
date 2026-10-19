@@ -1,7 +1,7 @@
 import XCTest
 @testable import DeviceCore
 
-private final class MemoryFS: RemoteFileSystem {
+final class MemoryFS: RemoteFileSystem {
     var files: [String: Data] = ["/Documents/state.db": Data("old database".utf8)]
     var directories: Set<String> = ["/", "/Documents"]
     var links: Set<String> = []

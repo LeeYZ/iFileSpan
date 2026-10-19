@@ -24,6 +24,9 @@ struct iFileSpanApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("显示主窗口") { lifecycle.restoreMainWindow() }
                     .keyboardShortcut("0", modifiers: .command)
+                Button("安装 IPA…") { model.installIPA() }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
+                    .disabled(!model.canInstallIPA)
             }
             CommandGroup(after: .toolbar) {
                 Button("重新检测设备") { model.detect() }.keyboardShortcut("r", modifiers: [.command, .shift]).disabled(model.busy)
@@ -92,6 +95,9 @@ struct ContentView: View {
                 }
                 Button { model.openMedia() } label: { Label("共享媒体目录", systemImage: "photo.on.rectangle") }
                     .disabled(model.deviceID.isEmpty)
+                Button { model.installIPA() } label: { Label("安装 IPA…", systemImage: "square.and.arrow.down") }
+                    .disabled(!model.canInstallIPA)
+                    .help("选择有效签名的 IPA，安装到当前设备 ⇧⌘I")
                 TextField("搜索 App 名称或标识符", text: $model.search)
                     .textFieldStyle(.roundedBorder)
                 Toggle("隐藏无权限的 App", isOn: $model.hideRestrictedApps).font(.caption)
@@ -268,11 +274,15 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             if let value = model.progress {
                 if value.total > 0 { ProgressView(value: Double(min(value.completed, value.total)), total: Double(value.total)) }
+                else { ProgressView().controlSize(.small) }
                 HStack {
                     Text(value.message).lineLimit(1)
                     Spacer()
-                    if value.total > 0 { Text("\(ByteCountFormatter.string(fromByteCount: Int64(clamping: value.completed), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(clamping: value.total), countStyle: .file))").monospacedDigit() }
-                    Button("取消") { model.cancellation.cancel() }
+                    if value.total > 0 {
+                        if value.unit == .percent { Text("\(min(value.completed, 100))%").monospacedDigit() }
+                        else { Text("\(ByteCountFormatter.string(fromByteCount: Int64(clamping: value.completed), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(clamping: value.total), countStyle: .file))").monospacedDigit() }
+                    }
+                    if value.cancellable { Button("取消") { model.cancellation.cancel() } }
                 }
             } else {
                 HStack {
@@ -286,6 +296,7 @@ struct ContentView: View {
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
             Button { model.detect() } label: { Label("重新检测", systemImage: "cable.connector") }.disabled(model.busy)
+            Button { model.installIPA() } label: { Label("安装 IPA", systemImage: "square.and.arrow.down") }.disabled(!model.canInstallIPA)
             Button { model.navigate(model.directory) } label: { Label("刷新", systemImage: "arrow.clockwise") }.disabled(model.root == nil || model.busy)
             Divider()
             Button { model.download() } label: { Label("下载", systemImage: "arrow.down.to.line") }.disabled(!canDownload || model.busy)
@@ -302,23 +313,29 @@ struct ContentView: View {
     private var help: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("使用说明与访问范围").font(.title2.bold())
-            Text("1. 程序已内置设备连接组件，无需安装 Homebrew。\n2. 使用 USB 连接 iPhone / iPad，解锁并选择“信任此电脑”。\n3. 点“重新检测”，选择设备和 App。双击文件夹进入。\n4. 选中文件后点“下载”或“替换”；“上传”用于添加新文件。")
-                .lineSpacing(6)
-            Divider()
-            Text("自动：优先请求 App 容器根目录；访问失败后尝试 Documents，并在主界面保留限制原因。\n容器根目录：从 / 浏览设备开放的目录，可尝试 Documents、Library、tmp；设备拒绝时直接显示错误。\n仅 Documents：只请求文件共享目录。\n共享媒体：只显示设备开放的媒体文件区，不能代替照片图库管理。")
-                .lineSpacing(5)
-            Text("应用列表默认不筛选文件共享状态。显示 App 不代表能读取其私有沙盒。普通未越狱设备通常无法直接读取第三方 App 的 Library、tmp。iExplorer 的备份浏览读取的是备份中的副本；tmp 通常不进入备份。本版本未集成备份解析或 Xcode 调试服务。")
-                .font(.callout).foregroundStyle(.secondary)
-            Text("替换或删除前请关闭目标 App。替换会保存本地备份；删除在确认后直接执行，不创建备份。删除需选中普通文件，可从工具栏或右键菜单发起，删除后无法通过本程序恢复。提交时请保持设备连接；断线后请刷新确认实际结果。")
-                .font(.callout)
-            Text("文件列表快捷键：⌘A 全选、⌘C 复制到文件剪贴板、⌘V 上传粘贴、⌘⌫ 删除、⇧⌘N 新建文件夹、⌘↑ 上一级、⌘↓ 打开文件夹、⌘R 刷新。支持 Command / Shift 多选；文字输入框使用正常的文字编辑快捷键。")
-                .font(.callout).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("1. 程序已内置设备连接组件，无需安装 Homebrew。\n2. 使用 USB 连接 iPhone / iPad，解锁并选择“信任此电脑”。\n3. 点“重新检测”，选择设备和 App。双击文件夹进入。\n4. 选中文件后点“下载”或“替换”；“上传”用于添加新文件。")
+                        .lineSpacing(6)
+                    Divider()
+                    Text("自动：优先请求 App 容器根目录；访问失败后尝试 Documents，并在主界面保留限制原因。\n容器根目录：从 / 浏览设备开放的目录，可尝试 Documents、Library、tmp；设备拒绝时直接显示错误。\n仅 Documents：只请求文件共享目录。\n共享媒体：只显示设备开放的媒体文件区，不能代替照片图库管理。")
+                        .lineSpacing(5)
+                    Text("应用列表默认不筛选文件共享状态。显示 App 不代表能读取其私有沙盒。普通未越狱设备通常无法直接读取第三方 App 的 Library、tmp。iExplorer 的备份浏览读取的是备份中的副本；tmp 通常不进入备份。本版本未集成备份解析或 Xcode 调试服务。")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Text("替换或删除前请关闭目标 App。替换会保存本地备份；删除在确认后直接执行，不创建备份。删除需选中普通文件，可从工具栏或右键菜单发起，删除后无法通过本程序恢复。提交时请保持设备连接；断线后请刷新确认实际结果。")
+                        .font(.callout)
+                    Text("文件列表快捷键：⌘A 全选、⌘C 复制到文件剪贴板、⌘V 上传粘贴、⌘⌫ 删除、⇧⌘N 新建文件夹、⌘↑ 上一级、⌘↓ 打开文件夹、⌘R 刷新。支持 Command / Shift 多选；文字输入框使用正常的文字编辑快捷键。")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Text("安装 IPA：选择设备后点“安装 IPA”，或按 ⇧⌘I，检查应用名称、版本与设备后确认。IPA 必须具备设备认可的签名与描述文件；本程序不会重签名或绕过系统限制。上传可取消，提交安装后请等待设备结果。同标识符的已有 App 可能被更新，请先自行备份其重要数据。")
+                        .font(.callout)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack {
                 Button("打开备份目录") { model.revealBackups() }
                 Spacer()
                 Button("完成") { model.helpSheet = false }.keyboardShortcut(.defaultAction)
             }
-        }.padding(28).frame(width: 610)
+        }.padding(28).frame(width: 650, height: 650)
     }
     private func icon(_ e: RemoteEntry) -> String { e.accessError != nil ? "lock.fill" : e.kind == .directory ? "folder.fill" : e.kind == .symbolicLink ? "link" : "doc" }
     private func kind(_ e: RemoteEntry) -> String {

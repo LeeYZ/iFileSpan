@@ -164,6 +164,10 @@ public actor DeviceService {
         return (info, entries)
     }
     public func disconnect() { filesystem = nil }
+    func installationFileSystem(_ udid: String) throws -> AFCFileSystem {
+        guard ready, !udid.isEmpty else { throw DeviceFilesError("请先检测并选择设备。") }
+        return try AFCFileSystem(udid: udid, bundle: "", container: false)
+    }
     private func connected() throws -> AFCFileSystem {
         guard let filesystem else { throw DeviceFilesError("请先选择设备和目录。") }; return filesystem
     }

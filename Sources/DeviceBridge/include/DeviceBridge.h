@@ -3,6 +3,7 @@
 #include <stdint.h>
 typedef struct DFSession DFSession;
 typedef struct DFBrowser DFBrowser;
+typedef struct DFInstaller DFInstaller;
 // Calls on each session/browser must be serialized. Call df_load before starting workers.
 // Errors are thread-local; read immediately on the calling thread. Buffers use df_free.
 int df_load(const char *framework_directory);
@@ -32,4 +33,11 @@ int df_close(DFSession *session, uint64_t handle);
 int df_move(DFSession *session, const char *from, const char *to);
 int df_remove(DFSession *session, const char *path);
 int df_mkdir(DFSession *session, const char *path);
+// Reads only the main Payload/*.app/Info.plist, without extracting the archive.
+int df_ipa_info(const char *path, char **info, uint64_t *size);
+// A separate installation service. Receive returns 1 for a one-second timeout.
+DFInstaller *df_installer_new(const char *udid);
+int df_installer_start(DFInstaller *installer, const char *package_path, const char *bundle_id);
+int df_installer_receive(DFInstaller *installer, char **status);
+void df_installer_free(DFInstaller *installer);
 #endif
